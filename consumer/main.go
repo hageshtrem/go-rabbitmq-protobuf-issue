@@ -14,8 +14,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const timeFormat = "02.01.2006"
-
 type envConfig struct {
 	RabbitURI string `env:"RABBIT_URI" default:"amqp://guest:guest@localhost:5672/"`
 }
@@ -26,7 +24,6 @@ type eventBus struct {
 	queueName string
 }
 
-// NewEventBus returns implementation of application.EventBus.
 func NewEventBus(uri string) (*eventBus, error) {
 	conn, err := rabbitmq.Dial(uri)
 	if err != nil {
@@ -75,7 +72,7 @@ func NewEventBus(uri string) (*eventBus, error) {
 
 func (eb *eventBus) Subscribe(event proto.Message, handleEvent func(event proto.Message) error) error {
 	routingKey := strings.Split(reflect.TypeOf(event).String(), ".")[1]
-	fmt.Printf("Routing key: %s\n", routingKey)
+
 	if err := eb.QueueBind(
 		eb.queueName, // queue name
 		routingKey,   // routing key
@@ -101,27 +98,27 @@ func (eb *eventBus) Subscribe(event proto.Message, handleEvent func(event proto.
 	go func() {
 		for d := range msgs {
 			message := reflect.ValueOf(event).Interface()
+
 			unmarshalOptions := proto.UnmarshalOptions{
 				DiscardUnknown: true,
 				AllowPartial:   true,
 			}
 			if err := unmarshalOptions.Unmarshal(d.Body, message.(proto.Message)); err != nil {
-				// log
-				fmt.Printf("Unmarshal err: %v\n%v\n", err, len(d.Body))
+				fmt.Printf("Message length: %d -- Unmarshal err: %v\n", len(d.Body), err)
 				continue
 			}
 
 			if err := handleEvent(message.(proto.Message)); err != nil {
-				// log
 				fmt.Printf("EventHandler err: %v\n", err)
 			}
 
-			if err := d.Ack(true); err != nil {
+			if err := d.Ack(false); err != nil {
 				fmt.Printf("Acknolegement error: %v\n", err)
 			}
 		}
 	}()
 
+	fmt.Printf("Registered handler for %s routing key\n", routingKey)
 	return nil
 }
 
@@ -138,17 +135,17 @@ func main() {
 	checkErr(err)
 	defer bus.Close()
 
-	bus.Subscribe(&producer.NewCargoBooked{}, func(event proto.Message) error {
+	checkErr(bus.Subscribe(&producer.NewCargoBooked{}, func(event proto.Message) error {
 		newCargo := event.(*producer.NewCargoBooked)
-		log.Printf("New Cargo booked: %v", newCargo)
+		fmt.Printf("Successfully received NewCargoBooked message [%v]\n", newCargo.GetTrackingId())
 		return nil
-	})
+	}))
 
-	bus.Subscribe(&producer.CargoToRouteAssigned{}, func(event proto.Message) error {
+	checkErr(bus.Subscribe(&producer.CargoToRouteAssigned{}, func(event proto.Message) error {
 		e := event.(*producer.CargoToRouteAssigned)
-		log.Printf("Cargo assigned to route: %v", e.GetTrackingId())
+		fmt.Printf("Successfully received CargoToRouteAssigned message [%v]\n", e.GetTrackingId())
 		return nil
-	})
+	}))
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)

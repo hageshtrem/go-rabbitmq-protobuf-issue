@@ -14,8 +14,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const timeFormat = "02.01.2006"
-
 type envConfig struct {
 	RabbitURI string `env:"RABBIT_URI" default:"amqp://guest:guest@localhost:5672/"`
 }
@@ -25,7 +23,6 @@ type eventBus struct {
 	*rabbitmq.Channel
 }
 
-// NewEventBus returns implementation of application.EventBus.
 func NewEventBus(uri string) (*eventBus, error) {
 	conn, err := rabbitmq.Dial(uri)
 	if err != nil {
@@ -58,7 +55,6 @@ func (eb *eventBus) Publish(message proto.Message) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Routing key: %s  Length: %v\n", routingKey, len(messageContent))
 
 	if err := eb.Channel.Publish(
 		"issue",    // publish to an exchange
@@ -66,7 +62,6 @@ func (eb *eventBus) Publish(message proto.Message) error {
 		false,      // mandatory
 		false,      // immediate
 		amqp.Publishing{
-			// Headers:   amqp.Table{},
 			ContentType:  "application/x-protobuf; proto=" + routingKey, // TODO: change when standardized
 			Body:         messageContent,
 			DeliveryMode: amqp.Transient, // 1=non-persistent, 2=persistent
@@ -76,6 +71,7 @@ func (eb *eventBus) Publish(message proto.Message) error {
 		return fmt.Errorf("Exchange Publish: %s", err)
 	}
 
+	fmt.Printf("Successfully published %d byte message for %s routing key\n", len(messageContent), routingKey)
 	return nil
 }
 

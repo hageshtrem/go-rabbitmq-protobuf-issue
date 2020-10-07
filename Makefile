@@ -1,6 +1,3 @@
-run: gen
-	docker-compose up -d
-
 gen: gen-producer gen-consumer
 
 gen-producer:
@@ -9,4 +6,4 @@ gen-producer:
 gen-consumer:
 	@protoc --proto_path=proto --go_out=consumer/pb proto/booking_events.proto proto/itinerary.proto
 
-.PHONY: gen gen-producer gen-consumer run
+.PHONY: gen gen-producer gen-consumer
