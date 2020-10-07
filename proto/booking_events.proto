@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package producer;
+
+option go_package = "producer/pb";
+
+import "google/protobuf/timestamp.proto";
+import "itinerary.proto";
+
+message NewCargoBooked {
+  string tracking_id = 1;
+  string origin = 2;
+  string destination = 3;
+  google.protobuf.Timestamp arrival_deadline = 4;
+}
+
+message CargoToRouteAssigned {
+  string tracking_id = 1;
+  Itinerary itinerary = 2;
+  google.protobuf.Timestamp eta = 3;
+}
