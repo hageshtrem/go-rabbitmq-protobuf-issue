@@ -18,31 +18,36 @@ type envConfig struct {
 	RabbitURI string `env:"RABBIT_URI" default:"amqp://guest:guest@localhost:5672/"`
 }
 
+type handler func(body []byte) error
+
 type consumer struct {
-	subscribersSync sync.RWMutex
-	subscribers     map[string]chan<- []byte
+	handlersSync sync.RWMutex
+	handlers     map[string]handler
 }
 
 func (cons *consumer) process(msgs <-chan amqp.Delivery) {
 	for d := range msgs {
-		cons.subscribersSync.Lock()
-		ch, ok := cons.subscribers[d.Type]
-		if ok {
-			ch <- d.Body
+		cons.handlersSync.Lock()
+		h, ok := cons.handlers[d.Type]
+		if !ok {
+			fmt.Printf("Nohandler for received message: %s\n", d.Type)
 		}
-		cons.subscribersSync.Unlock()
+		cons.handlersSync.Unlock()
 
-		// TODO:
-		// if err := d.Ack(false); err != nil {
-		// 	fmt.Printf("Acknolegement error: %v\n", err)
-		// }
+		if err := h(d.Body); err != nil {
+			fmt.Printf("Err while processing msg: %s\n", d.Type)
+		}
+
+		if err := d.Ack(false); err != nil {
+			fmt.Printf("Acknolegement error: %v\n", err)
+		}
 	}
 }
 
-func (cons *consumer) addSubscriber(msgType string, out chan<- []byte) {
-	cons.subscribersSync.Lock()
-	defer cons.subscribersSync.Unlock()
-	cons.subscribers[msgType] = out
+func (cons *consumer) addHandler(msgType string, handler handler) {
+	cons.handlersSync.Lock()
+	defer cons.handlersSync.Unlock()
+	cons.handlers[msgType] = handler
 }
 
 type eventBus struct {
@@ -109,8 +114,8 @@ func NewEventBus(uri string) (*eventBus, error) {
 	}
 
 	consumer := consumer{
-		subscribersSync: sync.RWMutex{},
-		subscribers:     make(map[string]chan<- []byte),
+		handlersSync: sync.RWMutex{},
+		handlers:     make(map[string]handler),
 	}
 	go consumer.process(msgs)
 
@@ -129,28 +134,25 @@ func (eb *eventBus) Subscribe(event proto.Message, handleEvent func(event proto.
 		return err
 	}
 
-	msgsChan := make(chan []byte)
-	eb.consumer.addSubscriber(routingKey, msgsChan)
+	eb.consumer.addHandler(routingKey, func(body []byte) error {
+		message := reflect.ValueOf(event).Interface()
 
-	go func() {
-		for {
-			body := <-msgsChan
-			message := reflect.ValueOf(event).Interface()
-
-			unmarshalOptions := proto.UnmarshalOptions{
-				DiscardUnknown: true,
-				AllowPartial:   true,
-			}
-			if err := unmarshalOptions.Unmarshal(body, message.(proto.Message)); err != nil {
-				fmt.Printf("Message length: %d -- Unmarshal err: %v\n", len(body), err)
-				continue
-			}
-
-			if err := handleEvent(message.(proto.Message)); err != nil {
-				fmt.Printf("EventHandler err: %v\n", err)
-			}
+		unmarshalOptions := proto.UnmarshalOptions{
+			DiscardUnknown: true,
+			AllowPartial:   true,
 		}
-	}()
+		if err := unmarshalOptions.Unmarshal(body, message.(proto.Message)); err != nil {
+			fmt.Printf("Message length: %d -- Unmarshal err: %v\n", len(body), err)
+			return err
+		}
+
+		if err := handleEvent(message.(proto.Message)); err != nil {
+			fmt.Printf("EventHandler err: %v\n", err)
+			return err
+		}
+
+		return nil
+	})
 
 	fmt.Printf("Registered handler for %s routing key\n", routingKey)
 	return nil
