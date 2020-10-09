@@ -18,10 +18,38 @@ type envConfig struct {
 	RabbitURI string `env:"RABBIT_URI" default:"amqp://guest:guest@localhost:5672/"`
 }
 
+type consumer struct {
+	subscribersSync sync.RWMutex
+	subscribers     map[string]chan<- []byte
+}
+
+func (cons *consumer) process(msgs <-chan amqp.Delivery) {
+	for d := range msgs {
+		cons.subscribersSync.Lock()
+		ch, ok := cons.subscribers[d.Type]
+		if ok {
+			ch <- d.Body
+		}
+		cons.subscribersSync.Unlock()
+
+		// TODO:
+		// if err := d.Ack(false); err != nil {
+		// 	fmt.Printf("Acknolegement error: %v\n", err)
+		// }
+	}
+}
+
+func (cons *consumer) addSubscriber(msgType string, out chan<- []byte) {
+	cons.subscribersSync.Lock()
+	defer cons.subscribersSync.Unlock()
+	cons.subscribers[msgType] = out
+}
+
 type eventBus struct {
 	*rabbitmq.Connection
 	*rabbitmq.Channel
 	queueName string
+	consumer  consumer
 }
 
 func NewEventBus(uri string) (*eventBus, error) {
@@ -59,15 +87,34 @@ func NewEventBus(uri string) (*eventBus, error) {
 		return nil, err
 	}
 
-	if err := channel.Qos(
-		1,     // prefetch count
-		0,     // prefetch size
-		false, // global
-	); err != nil {
+	// if err := channel.Qos(
+	// 	1,     // prefetch count
+	// 	0,     // prefetch size
+	// 	false, // global
+	// ); err != nil {
+	// 	return nil, err
+	// }
+
+	msgs, err := channel.Consume(
+		q.Name, // queue
+		"",     // consumer
+		false,  // auto ack
+		false,  // exclusive
+		false,  // no local
+		false,  // no wait
+		nil,    // args
+	)
+	if err != nil {
 		return nil, err
 	}
 
-	return &eventBus{conn, channel, q.Name}, nil
+	consumer := consumer{
+		subscribersSync: sync.RWMutex{},
+		subscribers:     make(map[string]chan<- []byte),
+	}
+	go consumer.process(msgs)
+
+	return &eventBus{conn, channel, q.Name, consumer}, nil
 }
 
 func (eb *eventBus) Subscribe(event proto.Message, handleEvent func(event proto.Message) error) error {
@@ -82,38 +129,25 @@ func (eb *eventBus) Subscribe(event proto.Message, handleEvent func(event proto.
 		return err
 	}
 
-	msgs, err := eb.Channel.Consume(
-		eb.queueName, // queue
-		"",           // consumer
-		false,        // auto ack
-		false,        // exclusive
-		false,        // no local
-		false,        // no wait
-		nil,          // args
-	)
-	if err != nil {
-		return err
-	}
+	msgsChan := make(chan []byte)
+	eb.consumer.addSubscriber(routingKey, msgsChan)
 
 	go func() {
-		for d := range msgs {
+		for {
+			body := <-msgsChan
 			message := reflect.ValueOf(event).Interface()
 
 			unmarshalOptions := proto.UnmarshalOptions{
 				DiscardUnknown: true,
 				AllowPartial:   true,
 			}
-			if err := unmarshalOptions.Unmarshal(d.Body, message.(proto.Message)); err != nil {
-				fmt.Printf("Message length: %d -- Unmarshal err: %v\n", len(d.Body), err)
+			if err := unmarshalOptions.Unmarshal(body, message.(proto.Message)); err != nil {
+				fmt.Printf("Message length: %d -- Unmarshal err: %v\n", len(body), err)
 				continue
 			}
 
 			if err := handleEvent(message.(proto.Message)); err != nil {
 				fmt.Printf("EventHandler err: %v\n", err)
-			}
-
-			if err := d.Ack(false); err != nil {
-				fmt.Printf("Acknolegement error: %v\n", err)
 			}
 		}
 	}()

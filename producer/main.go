@@ -62,10 +62,11 @@ func (eb *eventBus) Publish(message proto.Message) error {
 		false,      // mandatory
 		false,      // immediate
 		amqp.Publishing{
-			ContentType:  "application/x-protobuf; proto=" + routingKey, // TODO: change when standardized
+			ContentType:  "application/x-protobuf",
+			Type:         routingKey, // routingKey is a type of message
 			Body:         messageContent,
-			DeliveryMode: amqp.Transient, // 1=non-persistent, 2=persistent
-			Priority:     0,              // 0-9
+			DeliveryMode: amqp.Persistent,
+			Priority:     0, // 0-9
 		},
 	); err != nil {
 		return fmt.Errorf("Exchange Publish: %s", err)
@@ -94,9 +95,10 @@ func main() {
 		Destination:     "JNTKO",
 		ArrivalDeadline: timestamppb.Now(),
 	}
-
 	checkErr(bus.Publish(&cargo))
+	cargo.TrackingId = "02"
 	checkErr(bus.Publish(&cargo))
+	cargo.TrackingId = "03"
 	checkErr(bus.Publish(&cargo))
 
 	legs := []*pb.Leg{
@@ -120,9 +122,10 @@ func main() {
 		Itinerary:  &pb.Itinerary{Legs: legs},
 		Eta:        timestamppb.Now(),
 	}
-
 	checkErr(bus.Publish(&routeAssigned))
+	routeAssigned.TrackingId = "02"
 	checkErr(bus.Publish(&routeAssigned))
+	routeAssigned.TrackingId = "03"
 	checkErr(bus.Publish(&routeAssigned))
 }
 
