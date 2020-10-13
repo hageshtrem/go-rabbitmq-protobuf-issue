@@ -23,38 +23,62 @@ type handler func(body []byte) error
 type consumer struct {
 	handlersSync sync.RWMutex
 	handlers     map[string]handler
+	errChan      chan<- error
+	enough       chan struct{}
 }
 
-func (cons *consumer) process(msgs <-chan amqp.Delivery) {
-	for d := range msgs {
-		cons.handlersSync.Lock()
-		h, ok := cons.handlers[d.Type]
-		if !ok {
-			fmt.Printf("Nohandler for received message: %s\n", d.Type)
-		}
-		cons.handlersSync.Unlock()
+func (con *consumer) process(msgs <-chan amqp.Delivery) {
+	go func() {
+		for {
+			select {
+			case d, ok := <-msgs:
+				if !ok {
+					break
+				}
 
-		if err := h(d.Body); err != nil {
-			fmt.Printf("Err while processing msg: %s\n", d.Type)
-		}
+				con.handlersSync.Lock()
+				h, ok := con.handlers[d.Type]
+				con.handlersSync.Unlock()
+				if !ok {
+					fmt.Printf("No handler for received message: %s\n", d.Type)
+					continue
+				}
 
-		if err := d.Ack(false); err != nil {
-			fmt.Printf("Acknolegement error: %v\n", err)
+				err := h(d.Body)
+				con.checkErr(err)
+
+				err = d.Ack(false)
+				con.checkErr(err)
+			case <-con.enough:
+				break
+			}
 		}
+	}()
+}
+
+func (con *consumer) addHandler(msgType string, handler handler) {
+	con.handlersSync.Lock()
+	defer con.handlersSync.Unlock()
+	con.handlers[msgType] = handler
+}
+
+func (con *consumer) checkErr(err error) {
+	if err == nil {
+		return
 	}
-}
 
-func (cons *consumer) addHandler(msgType string, handler handler) {
-	cons.handlersSync.Lock()
-	defer cons.handlersSync.Unlock()
-	cons.handlers[msgType] = handler
+	if con.errChan == nil {
+		panic(err)
+	}
+
+	con.errChan <- err
 }
 
 type eventBus struct {
 	*rabbitmq.Connection
 	*rabbitmq.Channel
 	queueName string
-	consumer  consumer
+	consumer  *consumer
 }
 
 func NewEventBus(uri string) (*eventBus, error) {
@@ -92,13 +116,13 @@ func NewEventBus(uri string) (*eventBus, error) {
 		return nil, err
 	}
 
-	// if err := channel.Qos(
-	// 	1,     // prefetch count
-	// 	0,     // prefetch size
-	// 	false, // global
-	// ); err != nil {
-	// 	return nil, err
-	// }
+	if err := channel.Qos(
+		1,     // prefetch count
+		0,     // prefetch size
+		false, // global
+	); err != nil {
+		return nil, err
+	}
 
 	msgs, err := channel.Consume(
 		q.Name, // queue
@@ -116,10 +140,12 @@ func NewEventBus(uri string) (*eventBus, error) {
 	consumer := consumer{
 		handlersSync: sync.RWMutex{},
 		handlers:     make(map[string]handler),
+		errChan:      nil,
+		enough:       make(chan struct{}),
 	}
-	go consumer.process(msgs)
+	consumer.process(msgs)
 
-	return &eventBus{conn, channel, q.Name, consumer}, nil
+	return &eventBus{conn, channel, q.Name, &consumer}, nil
 }
 
 func (eb *eventBus) Subscribe(event proto.Message, handleEvent func(event proto.Message) error) error {
@@ -158,7 +184,13 @@ func (eb *eventBus) Subscribe(event proto.Message, handleEvent func(event proto.
 	return nil
 }
 
+func (eb *eventBus) NotifyError(errChan chan<- error) {
+	eb.consumer.errChan = errChan
+}
+
 func (eb *eventBus) Close() {
+	fmt.Println("Shutting down...")
+	eb.consumer.enough <- struct{}{}
 	eb.Channel.Close()
 	eb.Connection.Close()
 }
@@ -171,21 +203,27 @@ func main() {
 	checkErr(err)
 	defer bus.Close()
 
+	errChan := make(chan error)
+	bus.NotifyError(errChan)
+
 	checkErr(bus.Subscribe(&producer.NewCargoBooked{}, func(event proto.Message) error {
 		newCargo := event.(*producer.NewCargoBooked)
 		fmt.Printf("Successfully received NewCargoBooked message [%v]\n", newCargo.GetTrackingId())
+		if newCargo.GetTrackingId() == "03" {
+			return fmt.Errorf("cargo error")
+		}
 		return nil
 	}))
-
 	checkErr(bus.Subscribe(&producer.CargoToRouteAssigned{}, func(event proto.Message) error {
 		e := event.(*producer.CargoToRouteAssigned)
 		fmt.Printf("Successfully received CargoToRouteAssigned message [%v]\n", e.GetTrackingId())
+		if e.GetTrackingId() == "03" {
+			return fmt.Errorf("route error")
+		}
 		return nil
 	}))
 
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	wg.Wait()
+	fmt.Println(<-errChan)
 }
 
 func checkErr(err error) {
