@@ -41,14 +41,18 @@ func (con *consumer) process(msgs <-chan amqp.Delivery) {
 				con.handlersSync.Unlock()
 				if !ok {
 					fmt.Printf("No handler for received message: %s\n", d.Type)
+					_ = d.Nack(false, true)
 					continue
 				}
 
-				err := h(d.Body)
-				con.checkErr(err)
+				if err := h(d.Body); err != nil {
+					_ = d.Nack(false, true)
+					con.processErr(err)
+				}
 
-				err = d.Ack(false)
-				con.checkErr(err)
+				if err := d.Ack(false); err != nil {
+					con.processErr(err)
+				}
 			case <-con.enough:
 				break
 			}
@@ -62,11 +66,7 @@ func (con *consumer) addHandler(msgType string, handler handler) {
 	con.handlers[msgType] = handler
 }
 
-func (con *consumer) checkErr(err error) {
-	if err == nil {
-		return
-	}
-
+func (con *consumer) processErr(err error) {
 	if con.errChan == nil {
 		panic(err)
 	}
@@ -105,12 +105,12 @@ func NewEventBus(uri string) (*eventBus, error) {
 	}
 
 	q, err := channel.QueueDeclare(
-		"",    // name
-		false, // durable
-		false, // delete when unused
-		true,  // exclusive
-		false, // no-wait
-		nil,   // arguments
+		"consQueue", // name
+		true,        // durable
+		false,       // delete when unused
+		false,       // exclusive
+		false,       // no-wait
+		nil,         // arguments
 	)
 	if err != nil {
 		return nil, err
@@ -208,18 +208,15 @@ func main() {
 
 	checkErr(bus.Subscribe(&producer.NewCargoBooked{}, func(event proto.Message) error {
 		newCargo := event.(*producer.NewCargoBooked)
-		fmt.Printf("Successfully received NewCargoBooked message [%v]\n", newCargo.GetTrackingId())
-		if newCargo.GetTrackingId() == "03" {
-			return fmt.Errorf("cargo error")
-		}
+		fmt.Printf("Received NewCargoBooked message [%v]\n", newCargo.GetTrackingId())
 		return nil
 	}))
 	checkErr(bus.Subscribe(&producer.CargoToRouteAssigned{}, func(event proto.Message) error {
 		e := event.(*producer.CargoToRouteAssigned)
-		fmt.Printf("Successfully received CargoToRouteAssigned message [%v]\n", e.GetTrackingId())
-		if e.GetTrackingId() == "03" {
-			return fmt.Errorf("route error")
-		}
+		fmt.Printf("Received CargoToRouteAssigned message [%v]\n", e.GetTrackingId())
+		// if e.GetTrackingId() == "03" {
+		// 	return fmt.Errorf("route error")
+		// }
 		return nil
 	}))
 
